@@ -26,8 +26,8 @@
 1. Клонувати репозиторій:
 
    ```bash
-   git clone https://github.com/your-username/qa-system.git
-   cd qa-system
+   git clone https://github.com/Andriaaan/llm-project.git
+   cd llm-project
    
 2. Створіть віртуальне оточення та активуйте його:
 
