@@ -6,6 +6,12 @@ from litellm import completion
 import nltk
 import os
 from sentence_transformers import SentenceTransformer, util
+from rerankers import Reranker
+
+# --- Реранкер ---
+from sentence_transformers import CrossEncoder
+
+cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 nltk.download('punkt')
 nltk.download('punkt_tab')
@@ -16,7 +22,7 @@ os.environ['GROQ_API_KEY'] = "gsk_jcuLKUeKP8LXWkH8k0iYWGdyb3FYdGDte7MaNtZQnaVnBd
 
 
 # --- Розбиття тексту на чанки ---
-def split_into_chunks(text, chunk_size=300):
+def split_into_chunks(text, chunk_size=50):
     words = text.split()
     chunks = [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
     return chunks
@@ -40,6 +46,15 @@ def semantic_search(corpus, query, model, top_k=5):
     cosine_scores = cosine_scores.cpu().detach().numpy()
     top_results = np.argpartition(-cosine_scores, range(top_k))[:top_k]
     return [(corpus[i], cosine_scores[i].item()) for i in top_results]
+
+
+# --- Повторне ранжування через Cross-Encoder ---
+def rerank_candidates(candidates, query):
+    docs = [doc for doc, _ in candidates]
+    query_doc_pairs = [(query, doc) for doc in docs]
+    rerank_scores = cross_encoder.predict(query_doc_pairs)
+    reranked_results = sorted(zip(docs, rerank_scores), key=lambda x: x[1], reverse=True)
+    return reranked_results
 
 
 # --- Завантаження даних з локальної директорії ---
@@ -78,11 +93,11 @@ st.write("Ця система знаходить відповіді на ваш�
 query = st.text_input("Введіть запит:")
 
 # Вибір параметрів
-top_k = st.slider("Кількість результатів для пошуку BM25:", 1, 10, 5)
+top_k_slider = st.slider("Кількість результатів для пошуку BM25:", 1, 10, 5)
+top_k = 30
 
 # Вибір методу пошуку
 search_method = st.selectbox("Оберіть метод пошуку:", ["BM25", "Семантичний пошук", "Комбінований пошук"])
-
 
 # Виконання запиту
 if query:
@@ -91,51 +106,58 @@ if query:
         st.write("### Результати:")
 
         if search_method == "BM25":
-            bm25_results = bm25_search(chunked_dataset, query, top_k=top_k)
-            for i, (doc, score) in enumerate(bm25_results, 1):
-                st.write(f"**Чанк {i}** (релевантність: {score:.2f})")
-                st.write(doc[:300] + "...")
+            results = bm25_search(chunked_dataset, query, top_k=top_k)
 
         elif search_method == "Семантичний пошук":
-            semantic_results = semantic_search(chunked_dataset, query, model, top_k=top_k)
-            for i, (doc, score) in enumerate(semantic_results, 1):
-                st.write(f"**Чанк {i}** (релевантність: {score:.2f})")
-                st.write(doc[:300] + "...")
+            results = semantic_search(chunked_dataset, query, model, top_k=top_k)
 
         elif search_method == "Комбінований пошук":
             bm25_results = bm25_search(chunked_dataset, query, top_k=top_k)
             semantic_results = semantic_search(chunked_dataset, query, model, top_k=top_k)
 
             # Об'єднуємо результати з BM25 та семантичного пошуку
-            combined_results = bm25_results + semantic_results
-            combined_results = sorted(combined_results, key=lambda x: x[1], reverse=True)[:top_k]
+            results = bm25_results + semantic_results
+            results = sorted(results, key=lambda x: x[1], reverse=True)[:top_k]
 
-            for i, (doc, score) in enumerate(combined_results, 1):
-                st.write(f"**Чанк {i}** (релевантність: {score:.2f})")
-                st.write(doc[:300] + "...")
+        for i, (doc, score) in enumerate(results[:top_k_slider], 1):
+            st.write(f"**Чанк {i}** (релевантність: {score:.2f})")
+            st.write(doc)
 
-    # Об'єднуємо знайдені чанки для моделі, залежно від вибраного методу пошуку
-    if search_method == "BM25":
-        context = "\n\n".join([doc for doc, _ in bm25_results])
+    use_reranker = st.checkbox("Використовувати реранкер для покращення результатів")
 
-    elif search_method == "Семантичний пошук":
-        context = "\n\n".join([doc for doc, _ in semantic_results])
+    if use_reranker:
+        results = rerank_candidates(results, query)
+        st.write("Результати після реранкінгу:")
+    else:
+        results = results
+        st.write("Результати без реранкінгу:")
 
-    elif search_method == "Комбінований пошук":
-        # Об'єднуємо результати BM25 та семантичного пошуку
-        combined_results = bm25_results + semantic_results
-        combined_results = sorted(combined_results, key=lambda x: x[1], reverse=True)[:top_k]
-        context = "\n\n".join([doc for doc, _ in combined_results])
+    results = results[:top_k_slider]
+
+    # Виводимо результати
+    for i, (doc, score) in enumerate(results, 1):
+        st.write(f"**Чанк {i}** (релевантність: {score:.2f})")
+        st.write(doc)
+
+    context = "\n\n".join([f"Chunk {index + 1}: {doc}" for index, (doc, _) in enumerate(results)])
 
     st.write("### Відповідь моделі:")
 
     # Генеруємо відповідь через Groq (за допомогою litellm)
+    st.write("### Model's Answer:")
     response = completion(
         model="groq/llama3-8b-8192",
         messages=[
             {"role": "user", "content": query},
-            {"role": "system", "content": f"Context: {context}"}
-        ]
+            {"role": "system", "content": f"Context:\n{context}"},
+            {
+                "role": "system",
+                "content": (
+                    "Use the context to generate an answer. Please cite the sources in brackets "
+                    "using the format [Chunk N] where relevant information is used."
+                ),
+            },
+        ],
     )
 
     # Виводимо відповідь
