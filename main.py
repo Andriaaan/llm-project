@@ -11,6 +11,7 @@ from sentence_transformers import SentenceTransformer, util , CrossEncoder
 
 # Завантаження необхідних ресурсів
 nltk.download('punkt')
+nltk.download('punkt_tab')
 
 # Ініціалізація моделей
 model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
